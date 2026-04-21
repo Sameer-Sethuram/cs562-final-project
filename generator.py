@@ -1,4 +1,106 @@
+"""
+CS562 Final Project — Query Processing Engine (QPE) generator.
+
+Parses a Φ-operator spec file and (eventually) emits a Python program that
+evaluates MF/EMF OLAP queries over the PostgreSQL `sales` table without
+relying on the DBMS for any aggregation.
+"""
+from __future__ import annotations
+
 import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Parsed Φ-operator spec
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Aggregate:
+    """One aggregate token from F-VECT, e.g. '1_sum_quant' or 'sum_quant'."""
+    gv: int            # 0 for bare aggregates, 1..n for grouping-variable-subscripted
+    func: str          # 'sum' | 'count' | 'avg' | 'min' | 'max'
+    attr: str          # attribute being aggregated, e.g. 'quant'
+    key: str           # original token; used as the dict key in generated code
+
+
+@dataclass
+class PhiSpec:
+    """A parsed Φ-operator spec: projection, grouping, aggregates, predicates."""
+    S:     list[str]        = field(default_factory=list)   # projected attributes in order
+    n:     int              = 0                             # number of grouping variables
+    V:     list[str]        = field(default_factory=list)   # grouping attributes
+    F:     list[Aggregate]  = field(default_factory=list)   # aggregate functions
+    sigma: list[str]        = field(default_factory=list)   # raw predicate per GV, len == n
+    G:     str | None       = None                          # having-clause predicate, if any
+
+
+# ---------------------------------------------------------------------------
+# Input parsing
+# ---------------------------------------------------------------------------
+
+def _parse_agg(token: str) -> Aggregate:
+    """Parse '1_sum_quant' or 'sum_quant' into an Aggregate (splits on '_')."""
+    t = token.strip()
+    parts = t.split("_")
+    if parts[0].isdigit():
+        return Aggregate(gv=int(parts[0]), func=parts[1],
+                         attr="_".join(parts[2:]), key=t)
+    return Aggregate(gv=0, func=parts[0],
+                     attr="_".join(parts[1:]), key=t)
+
+
+def read_input(path: str | Path) -> PhiSpec:
+    """
+    Parse a Φ-spec file. The file has a fixed sequence of six heading/value
+    pairs — one heading per line (any line ending with a colon) followed by
+    its value on the very next line:
+
+        SELECT ATTRIBUTE(S):
+        cust, 1_sum_quant, 2_sum_quant, 3_sum_quant
+        NUMBER OF GROUPING VARIABLES(n):
+        3
+        GROUPING ATTRIBUTES(V):
+        cust
+        F-VECT([F]):
+        1_sum_quant, 2_sum_quant, 3_sum_quant
+        SELECT CONDITION-VECT([σ]):
+        1.state='NY'; 2.state='NJ'; 3.state='CT'
+        HAVING_CONDITION(G):
+        (blank — G has no value)
+    """
+    lines = [l.strip() for l in Path(path).read_text(encoding="utf-8").splitlines()
+             if l.strip()]
+
+    # Walk pairs: a heading contains a colon; the value is the next line,
+    # unless that next line is itself a heading (then the value is empty).
+    values: list[str] = []
+    i = 0
+    while i < len(lines):
+        if ":" in lines[i]:
+            if i + 1 < len(lines) and ":" not in lines[i + 1]:
+                values.append(lines[i + 1])
+                i += 2
+            else:
+                values.append("")
+                i += 1
+        else:
+            i += 1
+
+    # Pad so unpacking survives a missing trailing HAVING value.
+    values += [""] * (6 - len(values))
+    s_val, n_val, v_val, f_val, sigma_val, g_val = values[:6]
+
+    return PhiSpec(
+        S=[t.strip() for t in s_val.split(",") if t.strip()],
+        n=int(n_val) if n_val else 0,
+        V=[t.strip() for t in v_val.split(",") if t.strip()],
+        F=[_parse_agg(t) for t in f_val.split(",") if t.strip()],
+        sigma=[t.strip() for t in sigma_val.split(";") if t.strip()],
+        G=g_val or None,
+    )
 
 
 def main():
@@ -57,4 +159,9 @@ if "__main__" == __name__:
 
 
 if "__main__" == __name__:
-    main()
+    if len(sys.argv) > 1:
+        # Debug hook: parse and pretty-print the Φ-spec file, no code generation yet.
+        from pprint import pprint
+        pprint(read_input(sys.argv[1]))
+    else:
+        main()
