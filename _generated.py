@@ -18,20 +18,46 @@ def query():
                             cursor_factory=psycopg2.extras.DictCursor)
     cur = conn.cursor()
     cur.execute("SELECT * FROM sales")
-    
+
     _global = []
-    
+    mf_struct = {}
+
     for row in cur:
-        if row['quant'] > 10:
-            _global.append(row)
-    
-    
+        key = row['cust']
+        if key not in mf_struct:
+            mf_struct[key] = {'cust': row['cust'], '1_sum_quant': 0, '2_sum_quant': 0, '3_sum_quant': 0}
+        entry = mf_struct[key]
+
+    cur.execute("SELECT * FROM sales")
+    for row in cur:
+        if row['state']=='NY':
+            key = row['cust']
+            entry = mf_struct[key]
+            entry['1_sum_quant'] += row['quant']
+
+    cur.execute("SELECT * FROM sales")
+    for row in cur:
+        if row['state']=='NJ':
+            key = row['cust']
+            entry = mf_struct[key]
+            entry['2_sum_quant'] += row['quant']
+
+    cur.execute("SELECT * FROM sales")
+    for row in cur:
+        if row['state']=='CT':
+            key = row['cust']
+            entry = mf_struct[key]
+            entry['3_sum_quant'] += row['quant']
+
+    for entry in sorted(mf_struct.values(), key=lambda e: e['cust']):
+        _global.append(entry)
+
     return tabulate.tabulate(_global,
                         headers="keys", tablefmt="psql")
 
 def main():
     print(query())
-    
+
 if "__main__" == __name__:
     main()
     

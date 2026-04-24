@@ -1,0 +1,10 @@
+SELECT ATTRIBUTE(S):
+cust, sum_quant, count_quant, max_quant, min_quant
+NUMBER OF GROUPING VARIABLES(n):
+0
+GROUPING ATTRIBUTES(V):
+cust
+F-VECT([F]):
+sum_quant, count_quant, max_quant, min_quant
+SELECT CONDITION-VECT([σ]):
+HAVING_CONDITION(G):
