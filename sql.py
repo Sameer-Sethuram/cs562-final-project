@@ -25,6 +25,7 @@ def query():
     SUM(CASE WHEN state = 'CT' THEN quant ELSE 0 END) AS "3_sum_quant"
 FROM sales
 GROUP BY cust
+HAVING SUM(CASE WHEN state = 'NY' THEN quant ELSE 0 END) > SUM(CASE WHEN state = 'NJ' THEN quant ELSE 0 END)
 ORDER BY cust;
 """)
 
