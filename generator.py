@@ -33,48 +33,61 @@ class PhiSpec:
     G: str = None                                #HAVING expression
 
 
-#parses an aggregate token like '1_sum_quant' or 'sum_quant' into an Aggregate.
-def _parse_aggregate_token(token):
-    t = token.strip()
-    parts = t.split("_")
-    if parts[0].isdigit():
-        return Aggregate(gv=int(parts[0]), func=parts[1],
-                         attr="_".join(parts[2:]), key=t)
-    return Aggregate(gv=0, func=parts[0],
-                     attr="_".join(parts[1:]), key=t)
-
-
 #converts the six raw string operands into a PhiSpec — shared by the file and interactive readers.
 def _phi_spec_from_values(s_val, n_val, v_val, f_val, sigma_val, g_val):
-    S = []
-    for t in s_val.split(","):
-        t = t.strip()
-        if t != "":
-            S.append(t)
 
+    # --- parse S (SELECT attributes) ---
+    S = []
+    for token in s_val.split(","):
+        token = token.strip()
+        if token != "":
+            S.append(token)
+
+    # --- parse n (number of grouping variables) ---
     if n_val != "":
         n = int(n_val)
     else:
         n = 0
 
+    # --- parse V (GROUP BY attributes) ---
     V = []
-    for t in v_val.split(","):
-        t = t.strip()
-        if t != "":
-            V.append(t)
+    for token in v_val.split(","):
+        token = token.strip()
+        if token != "":
+            V.append(token)
 
+    # --- parse F (F-VECT aggregates) — each token like '1_sum_quant' or 'sum_quant' ---
     F = []
-    for t in f_val.split(","):
-        t = t.strip()
-        if t != "":
-            F.append(_parse_aggregate_token(t))
+    for token in f_val.split(","):
+        token = token.strip()
+        if token == "":
+            continue
 
+        parts = token.split("_")
+        if parts[0].isdigit():
+            aggregate = Aggregate(
+                gv=int(parts[0]),
+                func=parts[1],
+                attr="_".join(parts[2:]),
+                key=token,
+            )
+        else:
+            aggregate = Aggregate(
+                gv=0,
+                func=parts[0],
+                attr="_".join(parts[1:]),
+                key=token,
+            )
+        F.append(aggregate)
+
+    # --- parse sigma (per-GV predicates, separated by semicolons) ---
     sigma = []
-    for t in sigma_val.split(";"):
-        t = t.strip()
-        if t != "":
-            sigma.append(t)
+    for token in sigma_val.split(";"):
+        token = token.strip()
+        if token != "":
+            sigma.append(token)
 
+    # --- parse G (HAVING expression, may be blank) ---
     if g_val != "":
         G = g_val
     else:
@@ -118,67 +131,89 @@ def parse_phi_spec_interactive():
     print("Use commas in S, V, and F-VECT; use semicolons between per-GV predicates in sigma.")
     print("Leave HAVING blank for queries that don't filter groups.")
     print()
-    s_val = input("SELECT ATTRIBUTE(S):\n").strip()
-    n_val = input("NUMBER OF GROUPING VARIABLES(n):\n").strip()
-    v_val = input("GROUPING ATTRIBUTES(V):\n").strip()
-    f_val = input("F-VECT([F]):\n").strip()
+    s_val     = input("SELECT ATTRIBUTE(S):\n").strip()
+    n_val     = input("NUMBER OF GROUPING VARIABLES(n):\n").strip()
+    v_val     = input("GROUPING ATTRIBUTES(V):\n").strip()
+    f_val     = input("F-VECT([F]):\n").strip()
     sigma_val = input("SELECT CONDITION-VECT([sigma]):\n").strip()
-    g_val = input("HAVING_CONDITION(G):\n").strip()
+    g_val     = input("HAVING_CONDITION(G):\n").strip()
 
     return _phi_spec_from_values(s_val, n_val, v_val, f_val, sigma_val, g_val)
 
 
-#builds the python expression for the mf_struct dict key (single attr or tuple).
-def build_group_key_expression(V):
-    if len(V) == 1:
-        return f"row['{V[0]}']"
+#builds Scan 0: discovers groups and applies any gv==0 aggregates.
+#the group key expression and initial entry dict are built inline here.
+def build_discovery_scan(spec):
 
-    parts = []
-    for v in V:
-        parts.append(f"row['{v}']")
-    return "(" + ", ".join(parts) + ")"
+    # --- build the key expression (single attr or tuple of attrs) ---
+    if len(spec.V) == 1:
+        key_expr = f"row['{spec.V[0]}']"
+    else:
+        key_parts = []
+        for v in spec.V:
+            key_parts.append(f"row['{v}']")
+        key_expr = "(" + ", ".join(key_parts) + ")"
 
+    # --- build the initial entry dict for a newly-discovered group ---
+    init_parts = []
+    for v in spec.V:
+        init_parts.append(f"'{v}': row['{v}']")
 
-#builds the dict-literal source for a newly-discovered group's initial row.
-def build_initial_entry_dict(V, F):
-    parts = []
-    for v in V:
-        parts.append(f"'{v}': row['{v}']")
-
-    for agg in F:
+    for agg in spec.F:
         if agg.func == "sum" or agg.func == "count":
-            parts.append(f"'{agg.key}': 0")
+            init_parts.append(f"'{agg.key}': 0")
         elif agg.func == "min" or agg.func == "max":
-            parts.append(f"'{agg.key}': None")
+            init_parts.append(f"'{agg.key}': None")
         elif agg.func == "avg":
-            #avg needs hidden _sum_X and _count_X slots so finalize can divide.
-            parts.append(f"'{agg.key}': None")
-            parts.append(f"'_sum_{agg.key}': 0")
-            parts.append(f"'_count_{agg.key}': 0")
+            #avg needs hidden _sum and _count slots so the finalize stage can divide.
+            init_parts.append(f"'{agg.key}': None")
+            init_parts.append(f"'_sum_{agg.key}': 0")
+            init_parts.append(f"'_count_{agg.key}': 0")
         else:
             raise ValueError("unsupported aggregate func: " + agg.func)
 
-    return "{" + ", ".join(parts) + "}"
+    init_expr = "{" + ", ".join(init_parts) + "}"
+
+    # --- emit the scan loop ---
+    #no cur.execute here; scan 0 reuses the cursor that tmp already executed.
+    lines = []
+    lines.append("for row in cur:")
+    lines.append(f"    key = {key_expr}")
+    lines.append("    if key not in mf_struct:")
+    lines.append(f"        mf_struct[key] = {init_expr}")
+    lines.append("    entry = mf_struct[key]")
+
+    for agg in spec.F:
+        if agg.gv == 0:
+            update_block = build_aggregate_update_line(agg)
+            for update_line in update_block.split("\n"):
+                lines.append(f"    {update_line}")
+
+    return "\n".join(lines)
 
 
-#builds one source line that updates a single aggregate in `entry` from `row`.
+#builds one source line (or two for avg) that updates a single aggregate in `entry` from `row`.
 def build_aggregate_update_line(agg):
     if agg.func == "sum":
         return f"entry['{agg.key}'] += row['{agg.attr}']"
+
     if agg.func == "count":
         return f"entry['{agg.key}'] += 1"
+
     if agg.func == "min":
-        line = f"entry['{agg.key}'] = row['{agg.attr}']"
+        line  = f"entry['{agg.key}'] = row['{agg.attr}']"
         line += f" if entry['{agg.key}'] is None"
         line += f" else min(entry['{agg.key}'], row['{agg.attr}'])"
         return line
+
     if agg.func == "max":
-        line = f"entry['{agg.key}'] = row['{agg.attr}']"
+        line  = f"entry['{agg.key}'] = row['{agg.attr}']"
         line += f" if entry['{agg.key}'] is None"
         line += f" else max(entry['{agg.key}'], row['{agg.attr}'])"
         return line
+
     if agg.func == "avg":
-        sum_line = f"entry['_sum_{agg.key}'] += row['{agg.attr}']"
+        sum_line   = f"entry['_sum_{agg.key}'] += row['{agg.attr}']"
         count_line = f"entry['_count_{agg.key}'] += 1"
         return sum_line + "\n" + count_line
 
@@ -192,8 +227,8 @@ def translate_sigma_to_python(sigma_i, spec):
 
     #store string literals as __LIT<n>__ so the rewrites below don't touch them.
     literals = re.findall(r"'[^']*'", s)
-    for idx in range(len(literals)):
-        s = s.replace(literals[idx], f"__LIT{idx}__", 1)
+    for index in range(len(literals)):
+        s = s.replace(literals[index], f"__LIT{index}__", 1)
 
     #prefixed column refs (1.cust, 2.state) refer to the row currently being scanned.
     for col in _SALES_COLUMNS:
@@ -223,35 +258,13 @@ def translate_sigma_to_python(sigma_i, spec):
     s = re.sub(r"(?<![<>!=])=(?!=)", "==", s)
 
     s = re.sub(r"\bAND\b", "and", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bOR\b", "or", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bOR\b",  "or",  s, flags=re.IGNORECASE)
     s = re.sub(r"\bNOT\b", "not", s, flags=re.IGNORECASE)
 
-    for idx in range(len(literals)):
-        s = s.replace(f"__LIT{idx}__", literals[idx])
+    for index in range(len(literals)):
+        s = s.replace(f"__LIT{index}__", literals[index])
 
     return s
-
-
-#builds Scan 0: discovers groups and applies any gv==0 aggregates.
-def build_discovery_scan(spec):
-    key_expr = build_group_key_expression(spec.V)
-    init_expr = build_initial_entry_dict(spec.V, spec.F)
-
-    #no cur.execute here since scan 0 reuses the cursor that tmp already executed.
-    lines = []
-    lines.append("for row in cur:")
-    lines.append(f"    key = {key_expr}")
-    lines.append("    if key not in mf_struct:")
-    lines.append(f"        mf_struct[key] = {init_expr}")
-    lines.append("    entry = mf_struct[key]")
-
-    for agg in spec.F:
-        if agg.gv == 0:
-            update_block = build_aggregate_update_line(agg)
-            for update_line in update_block.split("\n"):
-                lines.append(f"    {update_line}")
-
-    return "\n".join(lines)
 
 
 #builds Scan i (i in 1..n): re-executes SELECT, filters by sigma_i, applies gv==i updates.
@@ -262,22 +275,30 @@ def build_grouping_variable_scan(i, spec):
 
     #if the predicate names entry['<v>'] for any V attr, every row may need to be tested
     #against every entry — that's how "all other customers" patterns work.
-    refs_v = False
+    references_grouping_attr = False
     for v in spec.V:
         if f"entry['{v}']" in pred:
-            refs_v = True
+            references_grouping_attr = True
             break
 
     lines = []
     lines.append('cur.execute("SELECT * FROM sales")')
     lines.append("for row in cur:")
 
-    if refs_v:
+    if references_grouping_attr:
         lines.append("    for entry in mf_struct.values():")
         lines.append(f"        if {pred}:")
         update_indent = "            "
     else:
-        key_expr = build_group_key_expression(spec.V)
+        # --- build the key expression inline (same logic as in build_discovery_scan) ---
+        if len(spec.V) == 1:
+            key_expr = f"row['{spec.V[0]}']"
+        else:
+            key_parts = []
+            for v in spec.V:
+                key_parts.append(f"row['{v}']")
+            key_expr = "(" + ", ".join(key_parts) + ")"
+
         lines.append(f"    key = {key_expr}")
         lines.append("    entry = mf_struct[key]")
         lines.append(f"    if {pred}:")
@@ -292,23 +313,24 @@ def build_grouping_variable_scan(i, spec):
     return "\n".join(lines)
 
 
-#emits a "for entry in mf_struct.values(): ..." block that divides any gv==gv_filter avg slots.
+#emits a "for entry in mf_struct.values(): ..." block that divides any avg slots for gv_filter.
 def build_avg_division_block(spec, gv_filter):
-    avg_aggs = []
+    avg_aggregates = []
     for agg in spec.F:
         if agg.gv == gv_filter and agg.func == "avg":
-            avg_aggs.append(agg)
+            avg_aggregates.append(agg)
 
-    if not avg_aggs:
+    if not avg_aggregates:
         return ""
 
     lines = []
     lines.append("for entry in mf_struct.values():")
-    for agg in avg_aggs:
-        line = (f"    entry['{agg.key}'] = "
-                f"(entry['_sum_{agg.key}'] / entry['_count_{agg.key}']) "
-                f"if entry['_count_{agg.key}'] else None")
-        lines.append(line)
+    for agg in avg_aggregates:
+        #divide the accumulated sum by the count; guard against zero count.
+        lines.append(f"    if entry['_count_{agg.key}'] != 0:")
+        lines.append(f"        entry['{agg.key}'] = entry['_sum_{agg.key}'] / entry['_count_{agg.key}']")
+        lines.append(f"    else:")
+        lines.append(f"        entry['{agg.key}'] = None")
 
     return "\n".join(lines)
 
@@ -319,8 +341,8 @@ def translate_having_to_python(G, spec):
 
     #store string literals as __LIT<n>__ so the rewrites below don't touch them.
     literals = re.findall(r"'[^']*'", s)
-    for idx in range(len(literals)):
-        s = s.replace(literals[idx], f"__LIT{idx}__", 1)
+    for index in range(len(literals)):
+        s = s.replace(literals[index], f"__LIT{index}__", 1)
 
     #wrap aggregate-shaped tokens (1_sum_quant, avg_quant, etc.) in entry['...'].
     s = re.sub(
@@ -334,17 +356,19 @@ def translate_having_to_python(G, spec):
 
     s = re.sub(r"(?<![<>!=])=(?!=)", "==", s)
     s = re.sub(r"\bAND\b", "and", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bOR\b", "or", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bOR\b",  "or",  s, flags=re.IGNORECASE)
     s = re.sub(r"\bNOT\b", "not", s, flags=re.IGNORECASE)
 
-    for idx in range(len(literals)):
-        s = s.replace(f"__LIT{idx}__", literals[idx])
+    for index in range(len(literals)):
+        s = s.replace(f"__LIT{index}__", literals[index])
 
     return s
 
 
 #builds the finalize stage: sort by V, apply HAVING, project to S (avgs already resolved by now).
 def build_finalize_stage(spec):
+
+    # --- build the sort key expression inline ---
     if len(spec.V) == 1:
         sort_key = f"e['{spec.V[0]}']"
     else:
@@ -353,11 +377,13 @@ def build_finalize_stage(spec):
             sort_parts.append(f"e['{v}']")
         sort_key = "(" + ", ".join(sort_parts) + ")"
 
+    # --- translate HAVING (or use True if there is none) ---
     if spec.G:
         having_expr = translate_having_to_python(spec.G, spec)
     else:
         having_expr = "True"
 
+    # --- build the projection dict ---
     proj_parts = []
     for col in spec.S:
         proj_parts.append(f"'{col}': entry['{col}']")
