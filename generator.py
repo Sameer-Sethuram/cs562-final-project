@@ -267,30 +267,28 @@ def translate_sigma_to_python(sigma_i, spec):
     return s
 
 
-#builds Scan i (i in 1..n): re-executes SELECT, filters by sigma_i, applies gv==i updates.
-#uses a nested row-x-entry loop when the predicate references a V grouping attribute
-#(e.g. "2.cust != cust") so a single row can contribute to multiple groups.
+#builds Scan i (i in 1..n): re-executes SELECT, filters by sigma_i, applies gv==i updates to populate the table we want.
+#Ensures that EMF queries are  also accomodated for, as we use a nested row-x-entry loop
 def build_grouping_variable_scan(i, spec):
     pred = translate_sigma_to_python(spec.sigma[i - 1], spec)
 
-    #if the predicate names entry['<v>'] for any V attr, every row may need to be tested
-    #against every entry — that's how "all other customers" patterns work.
-    references_grouping_attr = False
-    for v in spec.V:
+    references_grouping_attr = False #this tells us if it's an EMF query or an MF query.
+    for v in spec.V: #this figures out what type our query actually is.
         if f"entry['{v}']" in pred:
             references_grouping_attr = True
             break
 
+    #simple scan to accomodate such that clause from Phi variable.
     lines = []
     lines.append('cur.execute("SELECT * FROM sales")')
     lines.append("for row in cur:")
 
     if references_grouping_attr:
-        lines.append("    for entry in mf_struct.values():")
+        lines.append("    for entry in mf_struct.values():") #this is the nested loop that allows us to handle EMF queries.
         lines.append(f"        if {pred}:")
         update_indent = "            "
     else:
-        # --- build the key expression inline (same logic as in build_discovery_scan) ---
+        #build the key expression inline (same logic as in build_discovery_scan)
         if len(spec.V) == 1:
             key_expr = f"row['{spec.V[0]}']"
         else:
@@ -303,7 +301,9 @@ def build_grouping_variable_scan(i, spec):
         lines.append("    entry = mf_struct[key]")
         lines.append(f"    if {pred}:")
         update_indent = "        "
-
+    
+    #updates the aggregates for the grouping variable being operated on.
+    #essentially going bucket by bucket and computing the aggregates for each bucket one at a time.
     for agg in spec.F:
         if agg.gv == i:
             update_block = build_aggregate_update_line(agg)
@@ -313,20 +313,20 @@ def build_grouping_variable_scan(i, spec):
     return "\n".join(lines)
 
 
-#emits a "for entry in mf_struct.values(): ..." block that divides any avg slots for gv_filter.
+#computes the final averages amongst grouping variable aggregates.
 def build_avg_division_block(spec, gv_filter):
-    avg_aggregates = []
+    avg_aggregates = [] # a list holding whatever rows need to have their averages computed
     for agg in spec.F:
         if agg.gv == gv_filter and agg.func == "avg":
             avg_aggregates.append(agg)
 
-    if not avg_aggregates:
+    if not avg_aggregates: #early return if we know we don't need to compute any averages.
         return ""
 
     lines = []
     lines.append("for entry in mf_struct.values():")
     for agg in avg_aggregates:
-        #divide the accumulated sum by the count; guard against zero count.
+        #divide the accumulated sum by the count while guard against zero count.
         lines.append(f"    if entry['_count_{agg.key}'] != 0:")
         lines.append(f"        entry['{agg.key}'] = entry['_sum_{agg.key}'] / entry['_count_{agg.key}']")
         lines.append(f"    else:")
@@ -339,11 +339,12 @@ def build_avg_division_block(spec, gv_filter):
 def translate_having_to_python(G, spec):
     s = G.strip()
 
-    #store string literals as __LIT<n>__ so the rewrites below don't touch them.
+    #store string literals as __LIT<n>__ so the rewrites below don't accidentally corrupt our expression.
     literals = re.findall(r"'[^']*'", s)
     for index in range(len(literals)):
         s = s.replace(literals[index], f"__LIT{index}__", 1)
 
+    #claude helped us with the following regexes we are using here.
     #wrap aggregate-shaped tokens (1_sum_quant, avg_quant, etc.) in entry['...'].
     s = re.sub(
         r"(?<!')\b((?:\d+_)?(?:sum|count|avg|min|max)_\w+)\b(?!')",
@@ -351,24 +352,28 @@ def translate_having_to_python(G, spec):
         s,
     )
 
+    #does the same thing to the grouping attributes that we have
+    #this is just in case corruption occurs
     for v in spec.V:
         s = re.sub(rf"(?<!')\b{re.escape(v)}\b(?!')", f"entry['{v}']", s)
 
+    #converts the logical operators we see in phi to python logical operators.
     s = re.sub(r"(?<![<>!=])=(?!=)", "==", s)
     s = re.sub(r"\bAND\b", "and", s, flags=re.IGNORECASE)
     s = re.sub(r"\bOR\b",  "or",  s, flags=re.IGNORECASE)
     s = re.sub(r"\bNOT\b", "not", s, flags=re.IGNORECASE)
 
+    #puts the literals back to where they were.
     for index in range(len(literals)):
         s = s.replace(f"__LIT{index}__", literals[index])
 
     return s
 
 
-#builds the finalize stage: sort by V, apply HAVING, project to S (avgs already resolved by now).
+#formats and grouping attributes and applies the last filters (HAVING clause) to the table, afterwards projecting to S defined in the spec.
 def build_finalize_stage(spec):
 
-    # --- build the sort key expression inline ---
+    #sort/format the grouping variables using an inline expression.
     if len(spec.V) == 1:
         sort_key = f"e['{spec.V[0]}']"
     else:
@@ -377,44 +382,46 @@ def build_finalize_stage(spec):
             sort_parts.append(f"e['{v}']")
         sort_key = "(" + ", ".join(sort_parts) + ")"
 
-    # --- translate HAVING (or use True if there is none) ---
+    #translate HAVING to python code (or use True if there is none) according to the spec given.
     if spec.G:
-        having_expr = translate_having_to_python(spec.G, spec)
+        having_expr = translate_having_to_python(spec.G, spec) #uses the function we created earlier.
     else:
         having_expr = "True"
 
-    # --- build the projection dict ---
+    #build the projection dict so that our table only contains the columns we wanted from the spec.
     proj_parts = []
     for col in spec.S:
         proj_parts.append(f"'{col}': entry['{col}']")
     proj_dict = "{" + ", ".join(proj_parts) + "}"
 
+    #apply those three builds to the table using this python code
     lines = []
-    lines.append(f"for entry in sorted(mf_struct.values(), key=lambda e: {sort_key}):")
-    lines.append(f"    if {having_expr}:")
-    lines.append(f"        _global.append({proj_dict})")
+    lines.append(f"for entry in sorted(mf_struct.values(), key=lambda e: {sort_key}):") #sorts the grouping variables
+    lines.append(f"    if {having_expr}:") #applies the having expression (filters out the values that don't fit)
+    lines.append(f"        _global.append({proj_dict})") #ensure that the values are stored in the table that only has the columns we want.
 
     return "\n".join(lines)
 
 
-#builds the full body string spliced into tmp's {body} placeholder.
+#constructs the entire query using all of the functions that we defined above.
 def build_query_body(spec):
     parts = []
     parts.append("mf_struct = {}")
-    parts.append(build_discovery_scan(spec))
+    parts.append(build_discovery_scan(spec)) #scan 0 code, appended to the final output
 
-    #resolve avg slots eagerly after each scan so later scans (EMF) and HAVING can read them.
+    #computes the average aggregates for the averages that are computed over the table as the 0th grouping variable.
     divide_zero = build_avg_division_block(spec, 0)
     if divide_zero:
-        parts.append(divide_zero)
+        parts.append(divide_zero) #primarily for assistance with EMF queries and the HAVING clause.
 
+    #computes the other grouping variable scans and average computations in the same fashion as above.
     for i in range(1, spec.n + 1):
         parts.append(build_grouping_variable_scan(i, spec))
         divide_i = build_avg_division_block(spec, i)
         if divide_i:
             parts.append(divide_i)
 
-    parts.append(build_finalize_stage(spec))
+    parts.append(build_finalize_stage(spec)) #wraps up the sorting, the HAVING clause, and the projection that we need.
 
     raw = "\n\n".join(parts)
     indented = textwrap.indent(raw, "    ")
@@ -424,21 +431,14 @@ def build_query_body(spec):
         return indented[4:]
     return indented
 
+#runs main to generate the equivalent query.
+def main():
+    if len(sys.argv) > 1: #this is to process the case where want to input a path.
+        spec = parse_phi_spec_file(sys.argv[1])
+    else: #this is to process the case where the user wants to provide the spec interactively.
+        spec = parse_phi_spec_interactive()
 
-#file-mode entry point: parses a phi-spec file at `path` and runs the generated query.
-def main(path="inputs/three_states.txt"):
-    spec = parse_phi_spec_file(path)
-    _generate_and_run(spec)
-
-
-#interactive entry point: prompts the user at the console for each operand, then runs.
-def main_interactive():
-    spec = parse_phi_spec_interactive()
-    _generate_and_run(spec)
-
-
-#shared back-end: builds the body, splices it into tmp, writes _generated.py, runs it.
-def _generate_and_run(spec):
+    #builds the python code to process the query.
     body = build_query_body(spec)
 
     tmp = f"""
@@ -478,9 +478,5 @@ if "__main__" == __name__:
     open("_generated.py", "w").write(tmp)
     subprocess.run(["python", "_generated.py"])
 
-
-if "__main__" == __name__:
-    if len(sys.argv) > 1:
-        main(sys.argv[1])
-    else:
-        main_interactive()
+if __name__ == "__main__":
+    main()
