@@ -245,7 +245,7 @@ def translate_sigma_to_python(sigma_i, spec):
 
 
 #builds Scan i (i in 1..n): re-executes SELECT, filters by sigma_i, applies gv==i updates to populate the table we want.
-#Ensures that EMF queries are  also accomodated for, as we use a nested row-x-entry loop
+#Ensures that EMF queries are  also accomodated for, as we use a nested row-x-entry loop to compute "over all others" cases and etc.
 def build_grouping_variable_scan(i, spec):
     pred = translate_sigma_to_python(spec.sigma[i - 1], spec)
 
@@ -303,7 +303,7 @@ def build_avg_division_block(spec, gv_filter):
     lines = []
     lines.append("for entry in mf_struct.values():")
     for agg in avg_aggregates:
-        #divide the accumulated sum by the count while guard against zero count.
+        #divide the accumulated sum by the count while guarding against zero count.
         lines.append(f"    if entry['_count_{agg.key}'] != 0:")
         lines.append(f"        entry['{agg.key}'] = entry['_sum_{agg.key}'] / entry['_count_{agg.key}']")
         lines.append(f"    else:")
@@ -313,7 +313,7 @@ def build_avg_division_block(spec, gv_filter):
 
 
 #translates the HAVING expression G into a python boolean over `entry`.
-#CITE: Claude AI helped us with the following regexes we are using here.
+#CITE: Claude AI helped us with the following regexes we are using here as well as with the literal storing logic.
 def translate_having_to_python(G, spec):
     s = G.strip()
 
