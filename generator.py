@@ -1,8 +1,3 @@
-#CS562 Final Project — Query Processing Engine (QPE) generator.
-#parses a phi-operator spec file and emits a Python program that evaluates
-#MF/EMF OLAP queries over the PostgreSQL `sales` table without relying on
-#the DBMS for any aggregation.
-
 import re
 import subprocess
 import sys
@@ -11,7 +6,7 @@ from dataclasses import dataclass, field
 
 
 #columns of the sales table; identifies which bare names are column refs in predicates.
-_SALES_COLUMNS = ("cust", "prod", "day", "month", "year", "state", "quant", "date")
+SALES_COLUMNS = ("cust", "prod", "day", "month", "year", "state", "quant", "date")
 
 
 @dataclass
@@ -33,30 +28,31 @@ class PhiSpec:
     G: str = None                                #HAVING expression
 
 
-#converts the six raw string operands into a PhiSpec — shared by the file and interactive readers.
-def _phi_spec_from_values(s_val, n_val, v_val, f_val, sigma_val, g_val):
-
-    # --- parse S (SELECT attributes) ---
+#takes raw strings for each input (from a file scan or interactive input), and put them into a PhiSpec.
+def phi_spec_from_values(s_val, n_val, v_val, f_val, sigma_val, g_val):
+    '''
+    We have raw string inputs for each value, each separated by a comma. So:
+    We split on ',' to get each value, and append it to our array. 
+    This process is roughly the same for all 6 phi operands. 
+    '''
     S = []
     for token in s_val.split(","):
         token = token.strip()
         if token != "":
             S.append(token)
 
-    # --- parse n (number of grouping variables) ---
     if n_val != "":
         n = int(n_val)
     else:
         n = 0
 
-    # --- parse V (GROUP BY attributes) ---
     V = []
     for token in v_val.split(","):
         token = token.strip()
         if token != "":
             V.append(token)
 
-    # --- parse F (F-VECT aggregates) — each token like '1_sum_quant' or 'sum_quant' ---
+    #This case is slightly unique, as F is a list of aggregates. Because of this, we parse it further down into an "Aggregate" data class. 
     F = []
     for token in f_val.split(","):
         token = token.strip()
@@ -80,159 +76,140 @@ def _phi_spec_from_values(s_val, n_val, v_val, f_val, sigma_val, g_val):
             )
         F.append(aggregate)
 
-    # --- parse sigma (per-GV predicates, separated by semicolons) ---
     sigma = []
     for token in sigma_val.split(";"):
         token = token.strip()
         if token != "":
             sigma.append(token)
 
-    # --- parse G (HAVING expression, may be blank) ---
     if g_val != "":
         G = g_val
     else:
         G = None
 
-    return PhiSpec(S=S, n=n, V=V, F=F, sigma=sigma, G=G)
+    return PhiSpec(S=S, n=n, V=V, F=F, sigma=sigma, G=G) 
 
 
-#reads a phi-spec file and parses its six operands into a PhiSpec dataclass.
+#this function is for parsing a file input with ESQL.
 def parse_phi_spec_file(path):
-    lines = []
+    lines = [] #array for storing the lines
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             stripped = line.strip()
             if stripped != "":
-                lines.append(stripped)
+                lines.append(stripped) #adding each line of the file to the array blindly.
 
-    #traverse heading/value pairs: a heading contains ":", its value is the next non-heading line.
+    #this section is for parsing through the lines (now stored in an array)
     values = []
     i = 0
     while i < len(lines):
-        if ":" in lines[i]:
-            if i + 1 < len(lines) and ":" not in lines[i + 1]:
+        if ":" in lines[i]: #since the format is given, any line with a ':' is a "header", so the values will likely be below it.
+            if i + 1 < len(lines) and ":" not in lines[i + 1]: #if the line below does not have a colon, we know its the values. Append to our array.
                 values.append(lines[i + 1])
                 i += 2
-            else:
+            else: #if the line below has a colon, then the previous header did not have any values. so we append the empty string to the array
                 values.append("")
                 i += 1
-        else:
+        else: #if the line has a :, we know its a header, so we just skip
             i += 1
 
-    while len(values) < 6:
+    while len(values) < 6: #we must ensure that all phi operands have a value, even if they are not provided. since there are 6, we must do this until the length is 6.
         values.append("")
 
-    return _phi_spec_from_values(values[0], values[1], values[2], values[3], values[4], values[5])
+    return phi_spec_from_values(values[0], values[1], values[2], values[3], values[4], values[5]) #pass our parsed string operands to this function in order to turn them into a real PhiSpec class. 
 
 
-#prompts the user for each phi operand at the console and returns a PhiSpec.
-def parse_phi_spec_interactive():
-    print("Enter each Phi operand below.")
-    print("Use commas in S, V, and F-VECT; use semicolons between per-GV predicates in sigma.")
-    print("Leave HAVING blank for queries that don't filter groups.")
-    print()
-    s_val     = input("SELECT ATTRIBUTE(S):\n").strip()
-    n_val     = input("NUMBER OF GROUPING VARIABLES(n):\n").strip()
-    v_val     = input("GROUPING ATTRIBUTES(V):\n").strip()
-    f_val     = input("F-VECT([F]):\n").strip()
-    sigma_val = input("SELECT CONDITION-VECT([sigma]):\n").strip()
-    g_val     = input("HAVING_CONDITION(G):\n").strip()
-
-    return _phi_spec_from_values(s_val, n_val, v_val, f_val, sigma_val, g_val)
-
-
-#builds Scan 0: discovers groups and applies any gv==0 aggregates.
-#the group key expression and initial entry dict are built inline here.
-def build_discovery_scan(spec):
-
-    # --- build the key expression (single attr or tuple of attrs) ---
-    if len(spec.V) == 1:
+'''
+Generates the code to run the first loop in generated.py.
+1. Finds all unique combinations of attributes listed in the GROUP BY clause and puts them in the MF struct. 
+2. Applies any aggregates that have nothing to do with the grouping variable. 
+'''
+def initial_scan(spec):
+    #goal of this block of code is to build key_expr = "(row['cust'], row['prod']), .... for each V"
+    if len(spec.V) == 1: #if the length of the V array is 1, then we can just set the expression to the first value.
         key_expr = f"row['{spec.V[0]}']"
-    else:
+    else: #if the length of the V array is more than 1, then we construct a tuple of attributes.
         key_parts = []
         for v in spec.V:
             key_parts.append(f"row['{v}']")
         key_expr = "(" + ", ".join(key_parts) + ")"
 
-    # --- build the initial entry dict for a newly-discovered group ---
+    #goal of this block of code is to build init_expr, which is the initial/blank state for a group
     init_parts = []
     for v in spec.V:
         init_parts.append(f"'{v}': row['{v}']")
 
+    #this section just looks through the Aggregates in F, and determines what the aggregate function is. 
+    #It initializes the entry in the dictionary appropriately depending on what the function is.
     for agg in spec.F:
         if agg.func == "sum" or agg.func == "count":
             init_parts.append(f"'{agg.key}': 0")
         elif agg.func == "min" or agg.func == "max":
             init_parts.append(f"'{agg.key}': None")
         elif agg.func == "avg":
-            #avg needs hidden _sum and _count slots so the finalize stage can divide.
+            #avg needs hidden sum and count slots so the finalize stage can compute the avg.
             init_parts.append(f"'{agg.key}': None")
             init_parts.append(f"'_sum_{agg.key}': 0")
             init_parts.append(f"'_count_{agg.key}': 0")
         else:
-            raise ValueError("unsupported aggregate func: " + agg.func)
+            raise ValueError("unsupported aggregate func: " + agg.func) #edge case for if another aggregate function is implemented. 
 
     init_expr = "{" + ", ".join(init_parts) + "}"
 
-    # --- emit the scan loop ---
-    #no cur.execute here; scan 0 reuses the cursor that tmp already executed.
+
     lines = []
     lines.append("for row in cur:")
     lines.append(f"    key = {key_expr}")
     lines.append("    if key not in mf_struct:")
-    lines.append(f"        mf_struct[key] = {init_expr}")
+    lines.append(f"        mf_struct[key] = {init_expr}") #the key for the initial expression would be a unique combination of the specified attributes (e.g, (Alice, Apple) for (cust, prod))
     lines.append("    entry = mf_struct[key]")
 
+    #if the aggregate is not tied to a grouping attribute, we just write the code to compute it here.
     for agg in spec.F:
         if agg.gv == 0:
-            update_block = build_aggregate_update_line(agg)
+            update_block = build_aggregate_update_line(agg) #this is the function that updates the aggregate value inside of mf_struct. 
             for update_line in update_block.split("\n"):
                 lines.append(f"    {update_line}")
 
     return "\n".join(lines)
 
-
-#builds one source line (or two for avg) that updates a single aggregate in `entry` from `row`.
+#This function builds the code to update the aggregate value inside of mf_struct.
 def build_aggregate_update_line(agg):
     if agg.func == "sum":
-        return f"entry['{agg.key}'] += row['{agg.attr}']"
+        return f"entry['{agg.key}'] += row['{agg.attr}']" #for sum, we must add the value at the attribute.
 
     if agg.func == "count":
-        return f"entry['{agg.key}'] += 1"
+        return f"entry['{agg.key}'] += 1" #for count, we just increment by 1.
 
-    if agg.func == "min":
-        line  = f"entry['{agg.key}'] = row['{agg.attr}']"
-        line += f" if entry['{agg.key}'] is None"
-        line += f" else min(entry['{agg.key}'], row['{agg.attr}'])"
+    if agg.func == "min": #for min, if the value is undefined, we just set it to the current value. else, we set it to the minimum of what exists and the new value.
+        line  = f"entry['{agg.key}'] = row['{agg.attr}'] if entry['{agg.key}'] is None else min(entry['{agg.key}'], row['{agg.attr}'])"
         return line
 
-    if agg.func == "max":
-        line  = f"entry['{agg.key}'] = row['{agg.attr}']"
-        line += f" if entry['{agg.key}'] is None"
-        line += f" else max(entry['{agg.key}'], row['{agg.attr}'])"
+    if agg.func == "max": #for max, if the value is undefined, we just set it to the current value. else, we set it to the maximum of what exists and the new value.
+        line = "entry['{agg.key}'] = row['{agg.attr}'] if entry['{agg.key}'] is None else max(entry['{agg.key}'], row['{agg.attr}'])"
         return line
 
-    if agg.func == "avg":
+    if agg.func == "avg": #we need to compute a line for the sum, and the count, and then divide them!
         sum_line   = f"entry['_sum_{agg.key}'] += row['{agg.attr}']"
         count_line = f"entry['_count_{agg.key}'] += 1"
         return sum_line + "\n" + count_line
 
-    raise ValueError("unsupported aggregate func: " + agg.func)
+    raise ValueError("unsupported aggregate func: " + agg.func) #fallback for if there an unsupported aggregate provided. 
 
 
-#translates one sigma predicate into a python boolean over `row` (current scan row),
-#`entry` (the group's V values), and aggregates from earlier scans.
+#translates one sigma predicate into a python boolean over `row` (current scan row), entry (the group's V values), and aggregates from earlier scans.
+#CITE: Claude AI was used to help with the regex and overarching logic of this particular function. 
 def translate_sigma_to_python(sigma_i, spec):
     s = sigma_i.strip()
 
-    #store string literals as __LIT<n>__ so the rewrites below don't touch them.
+    #store strings with temp placeholders so that they do not get overwritten.
     literals = re.findall(r"'[^']*'", s)
     for index in range(len(literals)):
         s = s.replace(literals[index], f"__LIT{index}__", 1)
 
-    #prefixed column refs (1.cust, 2.state) refer to the row currently being scanned.
-    for col in _SALES_COLUMNS:
-        s = re.sub(rf"\b\d+\.{col}\b", f"row['{col}']", s)
+    #1.cust, 2.state, 3.quant -> row['cust'], row['state'], row['quant'].
+    for col in SALES_COLUMNS:
+        s = re.sub(rf"\b\d+\.{col}\b", f"row['{col}']", s) 
 
     #strip any leftover "<digits>." (e.g. before non-column tokens).
     s = re.sub(r"\b\d+\.", "", s)
@@ -251,7 +228,7 @@ def translate_sigma_to_python(sigma_i, spec):
         s = re.sub(rf"(?<!')\b{re.escape(v)}\b(?!')", f"entry['{v}']", s)
 
     #any remaining bare sales columns refer to the row.
-    for col in _SALES_COLUMNS:
+    for col in SALES_COLUMNS:
         s = re.sub(rf"(?<!')\b{col}\b(?!')", f"row['{col}']", s)
 
     #single "=" becomes "==", but leaves <=, >=, !=, == alone.
@@ -290,7 +267,7 @@ def build_grouping_variable_scan(i, spec):
         lines.append(f"        if {pred}:")
         update_indent = "            "
     else:
-        # --- build the key expression inline (same logic as in build_discovery_scan) ---
+        # --- build the key expression inline (same logic as in initial_scan) ---
         if len(spec.V) == 1:
             key_expr = f"row['{spec.V[0]}']"
         else:
@@ -401,7 +378,7 @@ def build_finalize_stage(spec):
 def build_query_body(spec):
     parts = []
     parts.append("mf_struct = {}")
-    parts.append(build_discovery_scan(spec))
+    parts.append(initial_scan(spec))
 
     #resolve avg slots eagerly after each scan so later scans (EMF) and HAVING can read them.
     divide_zero = build_avg_division_block(spec, 0)
@@ -433,8 +410,21 @@ def main(path="inputs/three_states.txt"):
 
 #interactive entry point: prompts the user at the console for each operand, then runs.
 def main_interactive():
-    spec = parse_phi_spec_interactive()
+    print("Enter each Phi operand below.")
+    print("Use commas in S, V, and F-VECT; use semicolons between per-GV predicates in sigma.")
+    print("Leave HAVING blank for queries that don't filter groups.")
+    print()
+    s_val     = input("SELECT ATTRIBUTE(S):\n").strip()
+    n_val     = input("NUMBER OF GROUPING VARIABLES(n):\n").strip()
+    v_val     = input("GROUPING ATTRIBUTES(V):\n").strip()
+    f_val     = input("F-VECT([F]):\n").strip()
+    sigma_val = input("SELECT CONDITION-VECT([sigma]):\n").strip()
+    g_val     = input("HAVING_CONDITION(G):\n").strip()
+ 
+    spec = phi_spec_from_values(s_val, n_val, v_val, f_val, sigma_val, g_val)
     _generate_and_run(spec)
+ 
+ 
 
 
 #shared back-end: builds the body, splices it into tmp, writes _generated.py, runs it.
