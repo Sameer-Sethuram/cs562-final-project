@@ -1,0 +1,10 @@
+Have 5 sql and phi queries that correspond to each other for when the demo comes
+Know the code inside and out, what's happening and what's not happening
+"What's one thing that you should've implemented in your code that you wanted to do"
+
+Know a couple of cases that won't work 
+
+EMF vs MF
+What's the difference in the algorithm
+He might want to test a few specific cases
+

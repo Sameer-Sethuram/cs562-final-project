@@ -30,18 +30,20 @@ def query():
 
     cur.execute("SELECT * FROM sales")
     for row in cur:
-        for entry in mf_struct.values():
-            if row['cust'] == entry['cust']:
-                entry['1_sum_quant'] += row['quant']
+        key = row['cust']
+        entry = mf_struct[key]
+        if row['state']=='NY':
+            entry['1_sum_quant'] += row['quant']
 
     cur.execute("SELECT * FROM sales")
     for row in cur:
-        for entry in mf_struct.values():
-            if row['cust'] != entry['cust']:
-                entry['2_sum_quant'] += row['quant']
+        key = row['cust']
+        entry = mf_struct[key]
+        if row['state']=='NJ':
+            entry['2_sum_quant'] += row['quant']
 
     for entry in sorted(mf_struct.values(), key=lambda e: e['cust']):
-        if entry['1_sum_quant'] > 1000000:
+        if True:
             _global.append({'cust': entry['cust'], '1_sum_quant': entry['1_sum_quant'], '2_sum_quant': entry['2_sum_quant']})
 
     return tabulate.tabulate(_global,
