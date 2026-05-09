@@ -43,7 +43,7 @@ def query():
             entry['2_sum_quant'] += row['quant']
 
     for entry in sorted(mf_struct.values(), key=lambda e: e['cust']):
-        if entry['1_sum_quant'] > entry['2_sum_quant']:
+        if True:
             _global.append({'cust': entry['cust'], '1_sum_quant': entry['1_sum_quant'], '2_sum_quant': entry['2_sum_quant']})
 
     return tabulate.tabulate(_global,

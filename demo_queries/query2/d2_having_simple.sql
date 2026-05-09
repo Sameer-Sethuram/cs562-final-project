@@ -7,5 +7,5 @@
 SELECT cust, SUM(quant) AS sum_quant
 FROM sales
 GROUP BY cust
-HAVING SUM(quant) > 1000000
+HAVING SUM(quant) > 10000
 ORDER BY cust;

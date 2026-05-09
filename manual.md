@@ -10,6 +10,20 @@ The group-by clause in SQL is notoriously inefficient to implement, and often re
 
 The Phi operator is a proposed solution to the issues that the group-by clause has, and in this codebase we implement a generator that ingests a file using relative paths or ingests the Phi attribute inputs using an interactive command line input mode. From there, it generates Python code to operate on the relation that we have in order to produce a table that follows the specifications of our Phi operator.
 
+## Setup
+
+Before running anything, the project needs a `.env` file in the same folder as `generator.py`. It should contain three lines:
+
+```
+USER=<your postgres username>
+PASSWORD=<your postgres password>
+DBNAME=<your database name>
+```
+
+We did not include our own `.env` in the submission since it holds personal credentials, so you will need to drop one in for the connection to work.
+
+The database itself must already have a `sales` table with the following columns: `cust`, `prod`, `day`, `month`, `year`, `state`, `quant`, `date`. All of our ESQL and SQL queries operate on this table, so without it both the generated code and the SQL comparison files will error out before producing any output.
+
 ## Instructions
 
 1. Once inside the project folder, install the required libraries for this project using the following command:
@@ -39,3 +53,17 @@ The Phi operator is a proposed solution to the issues that the group-by clause h
     ```
 
     If the command is not prompted with a filepath, it will default to the SQL query that is equivalent to three_states.txt.
+
+## Demo Queries
+
+Inside the `demo_queries` folder we have 5 queries that we will be using for the presentation, each in its own subfolder. The list below briefly describes what each query is meant to demonstrate:
+
+1. **Query 1** — Two grouping variables side by side: NY sums and NJ sums per customer. Demonstrates the basic multi-grouping-variable case where each grouping variable's scan updates a different column of the same `mf_struct` entry.
+
+2. **Query 2** — Single bare aggregate with HAVING: customers whose total purchase quantity exceeds 10,000. Demonstrates the simplest HAVING path with no grouping variables.
+
+3. **Query 3** — HAVING comparing two grouping-variable aggregates: customers whose NY total exceeds their NJ total. Demonstrates a HAVING predicate that compares two `entry['...']` fields against each other rather than against a constant.
+
+4. **Query 4** — EMF dependent aggregate: NJ count only for customers who also bought in NY. Demonstrates the "extended" in EMF, where one grouping variable's σ predicate references an aggregate computed by an earlier grouping variable's scan.
+
+5. **Query 5** — This vs others (self-referential predicate): each customer's total compared against the sum of all other customers' totals. Demonstrates the canonical EMF pattern where σ references the grouping attribute itself, switching the scan into a nested for-row, for-entry loop.
