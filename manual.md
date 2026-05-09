@@ -60,7 +60,7 @@ Inside the `demo_queries` folder we have 5 queries that we will be using for the
 
 1. **Query 1** — Two grouping variables side by side: NY sums and NJ sums per customer. Demonstrates the basic multi-grouping-variable case where each grouping variable's scan updates a different column of the same `mf_struct` entry.
 
-2. **Query 2** — Single bare aggregate with HAVING: customers whose total purchase quantity exceeds 10,000. Demonstrates the simplest HAVING path with no grouping variables.
+2. **Query 2** — Single grouping variable with multiple aggregates and HAVING: customers whose NY total exceeds 1,000, with both a NY sum and a NY count tracked per customer. Demonstrates Scan 0 doing bucket discovery, Scan 1 updating two aggregates of the same bucket in one σ-filtered pass, and HAVING filtering on a grouping-variable aggregate in the finalize stage.
 
 3. **Query 3** — HAVING comparing two grouping-variable aggregates: customers whose NY total exceeds their NJ total. Demonstrates a HAVING predicate that compares two `entry['...']` fields against each other rather than against a constant.
 

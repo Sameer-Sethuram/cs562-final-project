@@ -1,11 +1,12 @@
 SELECT ATTRIBUTE(S):
-cust, sum_quant
+cust, 1_sum_quant, 1_count_quant
 NUMBER OF GROUPING VARIABLES(n):
-0
+1
 GROUPING ATTRIBUTES(V):
 cust
 F-VECT([F]):
-sum_quant
+1_sum_quant, 1_count_quant
 SELECT CONDITION-VECT([σ]):
+1.state='NY'
 HAVING_CONDITION(G):
-sum_quant > 10000
+1_sum_quant > 1000

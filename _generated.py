@@ -25,7 +25,7 @@ def query():
     for row in cur:
         key = row['cust']
         if key not in mf_struct:
-            mf_struct[key] = {'cust': row['cust'], '1_sum_quant': 0, '2_sum_quant': 0}
+            mf_struct[key] = {'cust': row['cust'], '1_sum_quant': 0, '1_count_quant': 0}
         entry = mf_struct[key]
 
     cur.execute("SELECT * FROM sales")
@@ -34,17 +34,11 @@ def query():
         entry = mf_struct[key]
         if row['state']=='NY':
             entry['1_sum_quant'] += row['quant']
-
-    cur.execute("SELECT * FROM sales")
-    for row in cur:
-        key = row['cust']
-        entry = mf_struct[key]
-        if row['state']=='NJ':
-            entry['2_sum_quant'] += row['quant']
+            entry['1_count_quant'] += 1
 
     for entry in sorted(mf_struct.values(), key=lambda e: e['cust']):
-        if entry['1_sum_quant'] > entry['2_sum_quant']:
-            _global.append({'cust': entry['cust'], '1_sum_quant': entry['1_sum_quant'], '2_sum_quant': entry['2_sum_quant']})
+        if entry['1_sum_quant'] > 1000:
+            _global.append({'cust': entry['cust'], '1_sum_quant': entry['1_sum_quant'], '1_count_quant': entry['1_count_quant']})
 
     return tabulate.tabulate(_global,
                         headers="keys", tablefmt="psql")
